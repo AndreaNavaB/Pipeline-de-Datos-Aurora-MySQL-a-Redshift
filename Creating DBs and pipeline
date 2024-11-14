@@ -1,0 +1,299 @@
+1. Crear Aurora MySQL Cluster
+# Crear subnet group
+aws rds create-db-subnet-group \
+    --db-subnet-group-name aurora-subnet-group \
+    --db-subnet-group-description "Subnet group for Aurora" \
+    --subnet-ids subnet-xxxxx subnet-yyyyy
+
+# Crear cluster Aurora
+aws rds create-db-cluster \
+    --db-cluster-identifier sales-aurora-cluster \
+    --engine aurora-mysql \
+    --engine-version 5.7.mysql_aurora.2.11.2 \
+    --master-username admin \
+    --master-user-password YourPassword123! \
+    --db-subnet-group-name aurora-subnet-group \
+    --vpc-security-group-ids sg-xxxxx \
+    --backup-retention-period 7 \
+    --port 3306
+
+# Crear instancia Aurora
+aws rds create-db-instance \
+    --db-instance-identifier sales-aurora-instance \
+    --db-cluster-identifier sales-aurora-cluster \
+    --db-instance-class db.r5.large \
+    --engine aurora-mysql
+aws rds modify-db-instance \
+    --db-instance-identifier sales-aurora-instance \
+    --publicly-accessible \
+    --apply-immediately
+ 
+2. Crear Schema y Cargar Datos de Ejemplo
+-- Conectarse a Aurora usando MySQL client
+mysql -h sales-aurora-cluster.cluster-xxxxx.region.rds.amazonaws.com -u admin -p
+
+-- Crear base de datos y tablas
+CREATE DATABASE sales;
+USE sales;
+
+-- Tabla de Clientes
+CREATE TABLE customers (
+    customer_id INT PRIMARY KEY,
+    name VARCHAR(100),
+    email VARCHAR(100),
+    country VARCHAR(50),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Tabla de Productos
+CREATE TABLE products (
+    product_id INT PRIMARY KEY,
+    name VARCHAR(100),
+    category VARCHAR(50),
+    price DECIMAL(10,2),
+    stock INT
+);
+
+-- Tabla de Ventas
+CREATE TABLE sales (
+    sale_id INT PRIMARY KEY,
+    customer_id INT,
+    product_id INT,
+    quantity INT,
+    total_amount DECIMAL(10,2),
+    sale_date TIMESTAMP,
+    FOREIGN KEY (customer_id) REFERENCES customers(customer_id),
+    FOREIGN KEY (product_id) REFERENCES products(product_id)
+);
+
+-- Insertar datos de ejemplo
+INSERT INTO customers VALUES 
+(1, 'John Doe', 'john@example.com', 'USA', NOW()),
+(2, 'Jane Smith', 'jane@example.com', 'Canada', NOW()),
+(3, 'Mario Bros', 'mario@example.com', 'Italy', NOW());
+
+INSERT INTO products VALUES
+(1, 'Laptop', 'Electronics', 999.99, 50),
+(2, 'Smartphone', 'Electronics', 499.99, 100),
+(3, 'Headphones', 'Accessories', 99.99, 200);
+
+INSERT INTO sales VALUES
+(1, 1, 1, 1, 999.99, NOW()),
+(2, 2, 2, 2, 999.98, NOW()),
+(3, 3, 3, 3, 299.97, NOW());
+3. Crear Redshift Cluster
+# Crear subnet group para Redshift
+aws redshift create-cluster-subnet-group \
+    --cluster-subnet-group-name redshift-subnet-group \
+    --description "Subnet group for Redshift" \
+    --subnet-ids subnet-xxxxx subnet-yyyyy
+
+# Crear cluster Redshift
+aws redshift create-cluster \
+    --cluster-identifier sales-analysis \
+    --node-type dc2.large \
+    --number-of-nodes 2 \
+    --master-username admin \
+    --master-user-password YourPassword123! \
+    --cluster-subnet-group-name redshift-subnet-group \
+    --vpc-security-group-ids sg-xxxxx \
+    --publicly-accessible \
+    --port 5439
+4. Crear Schema en Redshift
+-- Conectarse a Redshift usando el Query Editor
+-- Crear tablas para el análisis
+
+CREATE SCHEMA sales_analysis;
+
+-- Tabla de Clientes
+CREATE TABLE sales_analysis.customers (
+    customer_id INT PRIMARY KEY,
+    name VARCHAR(100),
+    email VARCHAR(100),
+    country VARCHAR(50),
+    created_at TIMESTAMP
+) DISTSTYLE ALL;
+
+-- Tabla de Productos
+CREATE TABLE sales_analysis.products (
+    product_id INT PRIMARY KEY,
+    name VARCHAR(100),
+    category VARCHAR(50),
+    price DECIMAL(10,2),
+    stock INT
+) DISTSTYLE ALL;
+
+-- Tabla de Ventas (Fact Table)
+CREATE TABLE sales_analysis.sales (
+    sale_id INT PRIMARY KEY,
+    customer_id INT REFERENCES sales_analysis.customers(customer_id),
+    product_id INT REFERENCES sales_analysis.products(product_id),
+    quantity INT,
+    total_amount DECIMAL(10,2),
+    sale_date TIMESTAMP
+) DISTKEY(sale_date) SORTKEY(sale_date);
+5. Configurar DMS para Migración
+
+# Crea un archivo con la política de confianza
+cat <<EoF > dms-trust-policy.json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "dms.amazonaws.com"
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+EoF
+
+# Crear rol IAM para DMS
+aws iam create-role \
+    --role-name dms-access-role \
+    --assume-role-policy-document file://dms-trust-policy.json
+
+# Crear endpoint de origen (Aurora)
+aws dms create-endpoint \
+    --endpoint-identifier aurora-source \
+    --endpoint-type source \
+    --engine-name aurora \
+    --username admin \
+    --password YourPassword123! \
+    --server-name sales-aurora-cluster.cluster-xxxxx.region.rds.amazonaws.com \
+    --port 3306 \
+    --database-name sales
+
+# Crear endpoint de destino (Redshift)
+aws dms create-endpoint \
+    --endpoint-identifier redshift-target \
+    --endpoint-type target \
+    --engine-name redshift \
+    --username admin \
+    --password YourPassword123! \
+    --server-name sales-analysis.xxxxx.region.redshift.amazonaws.com \
+    --port 5439 \
+    --database-name dev
+
+# Crear replication instance
+aws dms create-replication-instance \
+    --replication-instance-identifier sales-replication \
+    --replication-instance-class dms.t3.medium \
+    --allocated-storage 50 \
+    --vpc-security-group-ids sg-xxxxx \
+    --publicly-accessible
+
+# Crear tarea de migración
+aws dms create-replication-task \
+    --replication-task-identifier sales-migration \
+    --source-endpoint-arn arn:aws:dms:region:account:endpoint:aurora-source \
+    --target-endpoint-arn arn:aws:dms:region:account:endpoint:redshift-target \
+    --replication-instance-arn arn:aws:dms:region:account:rep:sales-replication \
+    --migration-type full-load \
+    --table-mappings file://table-mappings.json \
+    --replication-task-settings file://task-settings.json
+6. Análisis en Redshift
+-- Consultas de análisis en Redshift
+
+-- Ventas totales por país
+SELECT 
+    c.country,
+    COUNT(*) as total_sales,
+    SUM(s.total_amount) as total_revenue
+FROM sales_analysis.sales s
+JOIN sales_analysis.customers c ON s.customer_id = c.customer_id
+GROUP BY c.country
+ORDER BY total_revenue DESC;
+
+-- Productos más vendidos por categoría
+SELECT 
+    p.category,
+    p.name,
+    SUM(s.quantity) as units_sold,
+    SUM(s.total_amount) as revenue
+FROM sales_analysis.sales s
+JOIN sales_analysis.products p ON s.product_id = p.product_id
+GROUP BY p.category, p.name
+ORDER BY units_sold DESC;
+
+-- Análisis temporal de ventas
+SELECT 
+    DATE_TRUNC('month', s.sale_date) as month,
+    COUNT(*) as total_sales,
+    SUM(s.total_amount) as monthly_revenue,
+    AVG(s.total_amount) as avg_sale_amount
+FROM sales_analysis.sales s
+GROUP BY DATE_TRUNC('month', s.sale_date)
+ORDER BY month;
+Archivos de Configuración Necesarios
+table-mappings.json
+{
+  "rules": [{
+    "rule-type": "selection",
+    "rule-id": "1",
+    "rule-name": "1",
+    "object-locator": {
+      "schema-name": "sales",
+      "table-name": "%"
+    },
+    "rule-action": "include"
+  }]
+}
+task-settings.json
+{
+  "TargetMetadata": {
+    "TargetSchema": "sales_analysis",
+    "SupportLobs": true,
+    "FullLobMode": false,
+    "LobChunkSize": 64,
+    "LimitedSizeLobMode": true,
+    "LobMaxSize": 32
+  },
+  "FullLoadSettings": {
+    "TargetTablePrepMode": "DROP_AND_CREATE",
+    "CreatePkAfterFullLoad": false,
+    "StopTaskCachedChangesApplied": false,
+    "StopTaskCachedChangesNotApplied": false,
+    "MaxFullLoadSubTasks": 8,
+    "TransactionConsistencyTimeout": 600,
+    "CommitRate": 10000
+  },
+  "Logging": {
+    "EnableLogging": true,
+    "LogComponents": [{
+      "Id": "TRANSFORMATION",
+      "Severity": "LOGGER_SEVERITY_DEFAULT"
+    }]
+  }
+}
+Limpieza del Laboratorio
+# Eliminar tarea DMS
+aws dms delete-replication-task \
+    --replication-task-arn arn:aws:dms:region:account:task:sales-migration
+
+# Eliminar instancia de replicación
+aws dms delete-replication-instance \
+    --replication-instance-arn arn:aws:dms:region:account:rep:sales-replication
+
+# Eliminar endpoints
+aws dms delete-endpoint --endpoint-arn arn:aws:dms:region:account:endpoint:aurora-source
+aws dms delete-endpoint --endpoint-arn arn:aws:dms:region:account:endpoint:redshift-target
+
+# Eliminar cluster Redshift
+aws redshift delete-cluster \
+    --cluster-identifier sales-analysis \
+    --skip-final-cluster-snapshot
+
+# Eliminar Aurora
+aws rds delete-db-instance --db-instance-identifier sales-aurora-instance
+aws rds delete-db-cluster \
+    --db-cluster-identifier sales-aurora-cluster \
+    --skip-final-snapshot
+#Notas Importantes
+#Reemplazar todos los valores XXX con los valores reales de tu cuenta
+#Asegurarse de tener los permisos IAM necesarios
+#Configurar los Security Groups apropiadamente
+#Monitorear los costos durante el laboratorio
+#Realizar la limpieza al finalizar para evitar cargos innecesarios
